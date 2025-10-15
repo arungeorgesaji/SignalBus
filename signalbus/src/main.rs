@@ -14,9 +14,9 @@ fn main() -> Result<()> {
                 cli::emit_signal(signal, payload).await
             })?;
         }
-        cli::Command::Listen { pattern } => {
+        cli::Command::Listen { pattern, exec } => {
             tokio::runtime::Runtime::new()?.block_on(async {
-                cli::listen_signals(pattern).await
+                cli::listen_signals(pattern, exec).await
             })?;
         }
         cli::Command::Daemon => {
