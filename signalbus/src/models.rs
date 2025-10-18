@@ -8,6 +8,13 @@ pub struct Signal {
     pub timestamp: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PersistentSignal {
+    pub signal: Signal,
+    pub id: u64,
+    pub ttl: Option<u64>, 
+}
+
 impl Signal {
     pub fn new(name: String, payload: Option<String>) -> anyhow::Result<Self> {
         let payload_value = match payload {

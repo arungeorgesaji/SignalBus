@@ -15,10 +15,10 @@ SignalBus is a **lightweight, local-first developer framework** for structured s
 
 ## Use Cases
 
-- Automating build/test/deploy pipelines locally.  
-- Connecting TUI or CLI tools with real-time event triggers.  
-- Monitoring and reacting to system or application signals.  
-- Rapid prototyping of event-driven developer frameworks.  
+- Automate local build/test/deploy pipelines. 
+- Connect TUI or CLI tools with real-time event triggers.
+- Monitor and react to system or application signals.
+- Prototype event-driven developer frameworks quickly.
 
 ---
 
@@ -31,6 +31,17 @@ SignalBus is a **lightweight, local-first developer framework** for structured s
 5. **OS Integration:** Optionally map native signals to high-level events.  
 
 ---
+
+## Advanced Features 
+
+- **Signal Persistence** - Store emitted signals temporarily so late-joining listeners can replay or catch up on missed events.
+- **Signal History** - Query recent signals from the daemon, including timestamp, sender, and payload metadata. 
+- **Rate Limiting** - Prevent signal spam by defining per-topic or per-sender emission limits. 
+- **Authentication** - Use token-based authentication to isolate users or processes in multi-user systems.
+- **Signal TTL (Time-to-Live)** - Automatically expire old signals to keep memory and event queues clean.
+- **Pattern Matching** - Subscribe using wildcards (*, ?, etc.) to handle dynamic or hierarchical topics (build:*, system.cpu.*).
+- **Priority Signals** - Optional priority queueing — urgent events can bypass normal rate limits.
+- **Scoped Listeners** - Limit listeners to specific namespaces or users for better isolation and debugging. 
 
 ## Example
 

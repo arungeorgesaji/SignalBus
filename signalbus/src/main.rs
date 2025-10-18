@@ -9,9 +9,9 @@ fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     
     match cli.command {
-        cli::Command::Emit { signal, payload } => {
+        cli::Command::Emit { signal, payload, ttl } => {
             tokio::runtime::Runtime::new()?.block_on(async {
-                cli::emit_signal(signal, payload).await
+                cli::emit_signal(signal, payload, ttl).await
             })?;
         }
         cli::Command::Listen { pattern, exec } => {
@@ -23,6 +23,11 @@ fn main() -> Result<()> {
             println!("Starting SignalBus daemon...");
             tokio::runtime::Runtime::new()?.block_on(async {
                 daemon::run_daemon().await
+            })?;
+        }
+        cli::Command::History { pattern, limit } => {
+            tokio::runtime::Runtime::new()?.block_on(async {
+                cli::show_history(pattern, limit).await
             })?;
         }
     }

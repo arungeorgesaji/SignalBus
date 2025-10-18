@@ -1,5 +1,5 @@
 use crate::daemon::SOCKET_PATH;
-use crate::models::Signal;
+use crate::models::{Signal, PersistentSignal};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -21,6 +21,8 @@ pub enum Command {
         signal: String,
         #[arg(long)]
         payload: Option<String>,
+        #[arg(long)]
+        ttl: Option<u64>,
     },
     Listen {
         pattern: String,
@@ -28,19 +30,31 @@ pub enum Command {
         exec: Option<String>,
     },
     Daemon,
+    History {
+        pattern: String,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
 }
 
-pub async fn emit_signal(signal_name: String, payload: Option<String>) -> Result<()> {
+pub async fn emit_signal(signal_name: String, payload: Option<String>, ttl: Option<u64>) -> Result<()> {
     let signal = Signal::new(signal_name, payload)?;
     
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     
-    let json = serde_json::to_string(&signal)?;
-    let message = format!("EMIT:{}\n", json);
-    stream.write_all(message.as_bytes()).await?;
+    let emit_command = if let Some(ttl_secs) = ttl {
+        format!("EMIT|{}|{}\n", serde_json::to_string(&signal)?, ttl_secs)
+    } else {
+        format!("EMIT|{}\n", serde_json::to_string(&signal)?)
+    };
+    
+    stream.write_all(emit_command.as_bytes()).await?;
     stream.flush().await?;
     
     println!("Signal emitted: {}", signal.name);
+    if let Some(ttl_secs) = ttl {
+        println!("TTL: {} seconds", ttl_secs);
+    }
     Ok(())
 }
 
@@ -124,6 +138,69 @@ async fn execute_command(cmd: &str, signal: &Signal) -> Result<()> {
         println!("Command executed successfully");
     } else {
         eprintln!("Command failed with exit code: {}", status);
+    }
+    
+    Ok(())
+}
+
+pub async fn show_history(pattern: String, limit: usize) -> Result<()> {
+    println!("Connecting to daemon...");
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    println!("Connected to daemon");
+    
+    let message = format!("HISTORY:{}|{}\n", pattern, limit);
+    println!("Sending: {}", message.trim());
+    
+    stream.write_all(message.as_bytes()).await?;
+    stream.flush().await?;
+    
+    let (reader, _) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut response = String::new();
+    
+    println!("Waiting for response...");
+    match reader.read_line(&mut response).await {
+        Ok(0) => {
+            println!("Daemon closed connection unexpectedly");
+            return Ok(());
+        }
+        Ok(_) => {
+            let response = response.trim();
+            println!("Raw response: '{}'", response);
+            
+            if response.is_empty() {
+                println!("No history data received");
+                return Ok(());
+            }
+            
+            match serde_json::from_str::<Vec<PersistentSignal>>(response) {
+                Ok(signals) => {
+                    if signals.is_empty() {
+                        println!("No recent signals matching '{}'", pattern);
+                    } else {
+                        println!("Recent signals matching '{}':", pattern);
+                        for ps in signals {
+                            println!("ID: {} | Signal: {} | Timestamp: {}", 
+                                ps.id, ps.signal.name, ps.signal.timestamp);
+                            if let Some(payload) = &ps.signal.payload {
+                                println!("   Payload: {}", payload);
+                            }
+                            if let Some(ttl) = ps.ttl {
+                                println!("   TTL: {}s", ttl);
+                            }
+                            println!("---");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error parsing history: {}", e);
+                    eprintln!("Raw response was: '{}'", response);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error reading response: {}", e);
+        }
     }
     
     Ok(())
