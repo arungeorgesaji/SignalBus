@@ -206,8 +206,8 @@ async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()
     reader.read_line(&mut line).await?;
     let line = line.trim();
     
-    if line.starts_with("LISTEN:") {
-        let pattern = line.trim_start_matches("LISTEN:").to_string();
+    if line.starts_with("LISTEN|") {
+        let pattern = line.trim_start_matches("LISTEN|").to_string();
         let (tx, rx) = async_channel::bounded(100);
         
         state.subscribe(pattern, tx).await;
@@ -239,8 +239,8 @@ async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()
                 let _ = writer.write_all(format!("ERROR:{}\n", e).as_bytes()).await;
             }
         }
-    } else if line.starts_with("HISTORY:") {
-        let rest = line.trim_start_matches("HISTORY:");
+    } else if line.starts_with("HISTORY|") {
+        let rest = line.trim_start_matches("HISTORY|");
         
         let parts: Vec<&str> = rest.splitn(2, '|').collect();
         println!("HISTORY parts: {:?}", parts);
