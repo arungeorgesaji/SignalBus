@@ -231,8 +231,15 @@ async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()
                     None  
                 };
                 
-                state.publish(signal, ttl).await?;
-                let _ = writer.write_all(b"OK\n").await;
+                match state.publish(signal, ttl).await {
+                    Ok(_) => {
+                        let _ = writer.write_all(b"OK\n").await;
+                    }
+                    Err(e) => {
+                        let error_msg = format!("ERROR:{}\n", e);
+                        let _ = writer.write_all(error_msg.as_bytes()).await;
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Invalid signal JSON: {}", e);
@@ -291,7 +298,21 @@ async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()
         }
     }
     else if line == "SHOW_RATE_LIMITS" {
-        writer.write_all(b"Rate limits feature active\n").await?;
+        let limits = state.rate_limits.lock().await;
+        if limits.is_empty() {
+            let _ = writer.write_all(b"No rate limits configured\n").await;
+        } else {
+            let mut response = String::new();
+            response.push_str("Configured rate limits:\n");
+            for (pattern, rule) in limits.iter() {
+                response.push_str(&format!(
+                    "  {}: {} signals per {} seconds\n",
+                    pattern, rule.max_signals, rule.time_window.as_secs()
+                ));
+            }
+            let _ = writer.write_all(response.as_bytes()).await;
+        }
+        let _ = writer.flush().await;
     } 
     
     Ok(())

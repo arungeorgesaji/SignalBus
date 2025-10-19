@@ -58,11 +58,26 @@ pub async fn emit_signal(signal_name: String, payload: Option<String>, ttl: Opti
     stream.write_all(emit_command.as_bytes()).await?;
     stream.flush().await?;
     
-    println!("Signal emitted: {}", signal.name);
-    if let Some(ttl_secs) = ttl {
-        println!("TTL: {} seconds", ttl_secs);
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+    let response = response.trim();
+    
+    if response == "OK" {
+        println!("Signal emitted: {}", signal.name);
+        if let Some(ttl_secs) = ttl {
+            println!("TTL: {} seconds", ttl_secs);
+        }
+        Ok(())
+    } else if response.starts_with("ERROR:") {
+        Err(anyhow::anyhow!("Failed to emit signal: {}", response))
+    } else {
+        println!("Signal emitted: {}", signal.name);
+        if let Some(ttl_secs) = ttl {
+            println!("TTL: {} seconds", ttl_secs);
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub async fn listen_signals(pattern: String, exec_cmd: Option<String>) -> Result<()> {
@@ -234,11 +249,28 @@ pub async fn show_rate_limits() -> Result<()> {
     stream.write_all(b"SHOW_RATE_LIMITS\n").await?;
     stream.flush().await?;
     
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response).await?;
+    let _ = stream.shutdown().await;
     
-    println!("Current rate limits:");
-    println!("{}", response.trim());
+    let (reader, _) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut response = String::new();
+    
+    loop {
+        response.clear();
+        match reader.read_line(&mut response).await {
+            Ok(0) => break, 
+            Ok(_) => {
+                let line = response.trim();
+                if !line.is_empty() {
+                    println!("{}", line);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading response: {}", e);
+                break;
+            }
+        }
+    }
+    
     Ok(())
 }
