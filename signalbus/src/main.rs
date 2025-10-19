@@ -30,6 +30,16 @@ fn main() -> Result<()> {
                 cli::show_history(pattern, limit).await
             })?;
         }
+        cli::Command::RateLimit { pattern, max_signals, per_seconds } => {
+            tokio::runtime::Runtime::new()?.block_on(async {
+                cli::set_rate_limit(pattern, max_signals, per_seconds).await
+            })?;
+        }
+        cli::Command::ShowRateLimits => {
+            tokio::runtime::Runtime::new()?.block_on(async {
+                cli::show_rate_limits().await
+            })?;
+        }
     }
     
     Ok(())

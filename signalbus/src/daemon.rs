@@ -4,7 +4,7 @@ use async_channel::Sender;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH, Duration, Instant};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -12,11 +12,19 @@ use tokio::sync::Mutex;
 
 pub const SOCKET_PATH: &str = "/tmp/signalbus.sock";
 
+#[derive(Clone)]
+struct RateLimitRule {
+    max_signals: u32,
+    time_window: Duration,
+}
+
 pub struct DaemonState {
     subscribers: Mutex<HashMap<String, Vec<Sender<Signal>>>>,
     signal_history: Mutex<VecDeque<PersistentSignal>>,
     max_history_size: usize,
     next_id: AtomicU64,
+    rate_limits: Mutex<HashMap<String, RateLimitRule>>,
+    signal_counters: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
 
 impl DaemonState {
@@ -24,8 +32,10 @@ impl DaemonState {
         Self {
             subscribers: Mutex::new(HashMap::new()),
             signal_history: Mutex::new(VecDeque::new()),
-            max_history_size: 1000, 
+            max_history_size: 1000,
             next_id: AtomicU64::new(1),
+            rate_limits: Mutex::new(HashMap::new()),
+            signal_counters: Mutex::new(HashMap::new()),
         }
     }
 
@@ -36,6 +46,13 @@ impl DaemonState {
     }
 
     pub async fn publish(&self, signal: Signal, ttl: Option<u64>) -> Result<()> {
+        if !self.check_rate_limit(&signal.name).await {
+            return Err(anyhow::anyhow!(
+                "Rate limit exceeded for signal: {}", 
+                signal.name
+            ));
+        }
+
         self.add_to_history(signal.clone(), ttl).await;
         
         let subs = self.subscribers.lock().await;
@@ -94,6 +111,62 @@ impl DaemonState {
         });
         
         println!("Cleanup completed, {} signals in history", history.len());
+    }
+
+    pub async fn set_rate_limit(&self, pattern: String, max_signals: u32, time_window_secs: u64) {
+        let rule = RateLimitRule {
+            max_signals,
+            time_window: Duration::from_secs(time_window_secs),
+        };
+        
+        let mut limits = self.rate_limits.lock().await;
+        limits.insert(pattern.clone(), rule);
+        println!("Rate limit set: {} signals per {} seconds for pattern '{}'", 
+                 max_signals, time_window_secs, pattern);
+    }
+
+    pub async fn check_rate_limit(&self, signal_name: &str) -> bool {
+        let limits = self.rate_limits.lock().await;
+        let mut counters = self.signal_counters.lock().await;
+        
+        let now = Instant::now();
+        
+        for (pattern, rule) in limits.iter() {
+            if pattern_match(pattern, signal_name) {
+                let counter = counters.entry(pattern.clone()).or_insert_with(VecDeque::new);
+                
+                while let Some(front) = counter.front() {
+                    if now.duration_since(*front) > rule.time_window {
+                        counter.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                
+                if counter.len() >= rule.max_signals as usize {
+                    println!("Rate limit exceeded for pattern '{}': {} signals in {} seconds", 
+                             pattern, counter.len(), rule.time_window.as_secs());
+                    return false;
+                }
+                
+                counter.push_back(now);
+                return true;
+            }
+        }
+        
+        true
+    }
+
+    pub async fn cleanup_rate_limit_counters(&self) {
+        let limits = self.rate_limits.lock().await;
+        let mut counters = self.signal_counters.lock().await;
+        let now = Instant::now();
+        
+        for (pattern, rule) in limits.iter() {
+            if let Some(counter) = counters.get_mut(pattern) {
+                counter.retain(|&timestamp| now.duration_since(timestamp) <= rule.time_window);
+            }
+        }
     }
 }
 
@@ -202,6 +275,23 @@ async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()
             eprintln!("Invalid HISTORY command format: {}", line);
             let _ = writer.write_all(b"[]\n").await;
         }
+    } else if line.starts_with("RATE_LIMIT|") {
+        let rest = line.trim_start_matches("RATE_LIMIT|");
+        let parts: Vec<&str> = rest.split('|').collect();
+        
+        if parts.len() == 3 {
+            let pattern = parts[0];
+            let max_signals: u32 = parts[1].parse()?;
+            let per_seconds: u64 = parts[2].parse()?;
+            
+            state.set_rate_limit(pattern.to_string(), max_signals, per_seconds).await;
+            writer.write_all(b"Rate limit configured successfully\n").await?;
+        } else {
+            writer.write_all(b"ERROR: Invalid RATE_LIMIT command format\n").await?;
+        }
+    }
+    else if line == "SHOW_RATE_LIMITS" {
+        writer.write_all(b"Rate limits feature active\n").await?;
     } 
     
     Ok(())
@@ -212,5 +302,6 @@ async fn start_cleanup_task(state: Arc<DaemonState>) {
     loop {
         interval.tick().await;
         state.cleanup_expired().await;
+        state.cleanup_rate_limit_counters().await;
     }
 }

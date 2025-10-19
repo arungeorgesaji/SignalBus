@@ -35,6 +35,13 @@ pub enum Command {
         #[arg(short, long, default_value = "10")]
         limit: usize,
     },
+    RateLimit {
+        pattern: String,
+        max_signals: u32,
+        #[arg(long)]
+        per_seconds: u64,
+    },
+    ShowRateLimits,
 }
 
 pub async fn emit_signal(signal_name: String, payload: Option<String>, ttl: Option<u64>) -> Result<()> {
@@ -66,7 +73,7 @@ pub async fn listen_signals(pattern: String, exec_cmd: Option<String>) -> Result
     
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     
-    let message = format!("LISTEN:{}\n", pattern);
+    let message = format!("LISTEN|{}\n", pattern);
     stream.write_all(message.as_bytes()).await?;
     stream.flush().await?;
     
@@ -148,7 +155,7 @@ pub async fn show_history(pattern: String, limit: usize) -> Result<()> {
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     println!("Connected to daemon");
     
-    let message = format!("HISTORY:{}|{}\n", pattern, limit);
+    let message = format!("HISTORY|{}|{}\n", pattern, limit);
     println!("Sending: {}", message.trim());
     
     stream.write_all(message.as_bytes()).await?;
@@ -206,3 +213,32 @@ pub async fn show_history(pattern: String, limit: usize) -> Result<()> {
     Ok(())
 }
 
+pub async fn set_rate_limit(pattern: String, max_signals: u32, per_seconds: u64) -> Result<()> {
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    
+    let command = format!("RATE_LIMIT|{}|{}|{}\n", pattern, max_signals, per_seconds);
+    stream.write_all(command.as_bytes()).await?;
+    stream.flush().await?;
+    
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+    
+    println!("{}", response.trim());
+    Ok(())
+}
+
+pub async fn show_rate_limits() -> Result<()> {
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    
+    stream.write_all(b"SHOW_RATE_LIMITS\n").await?;
+    stream.flush().await?;
+    
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+    
+    println!("Current rate limits:");
+    println!("{}", response.trim());
+    Ok(())
+}
