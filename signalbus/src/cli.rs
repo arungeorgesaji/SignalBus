@@ -6,6 +6,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command as TokioCommand;
 use std::process::Stdio;
+use std::fs;
+
+pub const TOKEN_FILE: &str = ".signalbus_token";
 
 #[derive(Parser)]
 #[command(name = "signalbus")]
@@ -23,42 +26,164 @@ pub enum Command {
         payload: Option<String>,
         #[arg(long)]
         ttl: Option<u64>,
+        #[arg(long)]
+        token: Option<String>,
     },
     Listen {
         pattern: String,
         #[arg(long)]
         exec: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
     },
     Daemon,
     History {
         pattern: String,
         #[arg(short, long, default_value = "10")]
         limit: usize,
+        #[arg(long)]
+        token: Option<String>,
     },
     RateLimit {
         pattern: String,
         max_signals: u32,
         #[arg(long)]
         per_seconds: u64,
+        #[arg(long)]
+        token: Option<String>,
     },
-    ShowRateLimits,
+    ShowRateLimits {
+        #[arg(long)]
+        token: Option<String>,
+    },
+    Login {
+        #[arg(short, long)]
+        user_id: String,
+        #[arg(short, long)]
+        password: String,
+    },
+    Logout,
+    CreateToken {
+        #[arg(short, long)]
+        user_id: String,
+        #[arg(short, long)]
+        permissions: Vec<String>,
+        #[arg(long)]
+        expires_in: Option<u64>, 
+    },
+    RevokeToken {
+        token: String,
+        #[arg(long)]
+        admin_token: Option<String>,
+    },
 }
 
-pub async fn emit_signal(signal_name: String, payload: Option<String>, ttl: Option<u64>) -> Result<()> {
+pub async fn login(user_id: String, password: String) -> Result<()> {
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    
+    let command = format!("LOGIN|{}|{}\n", user_id, password);
+    println!("Sending: {}", command.trim());  
+    stream.write_all(command.as_bytes()).await?;
+    stream.flush().await?;
+    
+    let mut reader = BufReader::new(&mut stream);
+    let mut response = String::new();
+    println!("Waiting for response...");
+    reader.read_line(&mut response).await?;
+    
+    let response = response.trim();
+    println!("Got: {}", response);  
+    
+    if response.starts_with("TOKEN:") {
+        let token = response.trim_start_matches("TOKEN:");
+        save_token(token)?;
+        println!("Login successful! Token saved to ~/.signalbus_token");
+        println!("Token: {}", token);  
+    } else {
+        eprintln!("Login failed: {}", response);
+    }
+    
+    Ok(())
+}
+
+pub async fn create_token(user_id: String, permissions: Vec<String>, expires_in: Option<u64>) -> Result<()> {
+    let token = load_token().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+    
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    
+    let perms_str = permissions.join(",");
+    let command = if let Some(expires) = expires_in {
+        format!("CREATE_TOKEN|{}|{}|{}|{}\n", token, user_id, perms_str, expires)
+    } else {
+        format!("CREATE_TOKEN|{}|{}|{}\n", token, user_id, perms_str)
+    };
+    
+    stream.write_all(command.as_bytes()).await?;
+    stream.flush().await?;
+    
+    let mut reader = BufReader::new(&mut stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+    
+    println!("{}", response.trim());
+    Ok(())
+}
+
+fn save_token(token: &str) -> Result<()> {
+    let mut path = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    path.push(TOKEN_FILE);
+    fs::write(path, token)?;
+    Ok(())
+}
+
+pub fn load_token() -> Option<String> {
+    let mut path = dirs::home_dir()?;
+    path.push(TOKEN_FILE);
+    fs::read_to_string(path).ok()
+}
+
+pub async fn revoke_token(token: String, admin_token: Option<String>) -> Result<()> {
+    let auth_token = admin_token.or_else(load_token).ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
+    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    
+    let command = format!("REVOKE_TOKEN|{}|{}\n", auth_token, token);
+    stream.write_all(command.as_bytes()).await?;
+    stream.flush().await?;
+    
+    let mut reader = BufReader::new(&mut stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+    
+    let response = response.trim();
+    if response == "OK" {
+        println!("Token revoked successfully");
+    } else if response.starts_with("ERROR:") {
+        eprintln!("Failed to revoke token: {}", response);
+    } else {
+        println!("{}", response);
+    }
+    
+    Ok(())
+}
+
+pub async fn emit_signal(signal_name: String, payload: Option<String>, ttl: Option<u64>, token: Option<String>) -> Result<()> {
+    let auth_token = token.or_else(load_token).ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
     let signal = Signal::new(signal_name, payload)?;
     
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     
     let emit_command = if let Some(ttl_secs) = ttl {
-        format!("EMIT|{}|{}\n", serde_json::to_string(&signal)?, ttl_secs)
+        format!("EMIT|{}|{}|{}\n", auth_token, serde_json::to_string(&signal)?, ttl_secs)
     } else {
-        format!("EMIT|{}\n", serde_json::to_string(&signal)?)
+        format!("EMIT|{}|{}\n", auth_token, serde_json::to_string(&signal)?)
     };
     
     stream.write_all(emit_command.as_bytes()).await?;
     stream.flush().await?;
     
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::new(&mut stream);
     let mut response = String::new();
     reader.read_line(&mut response).await?;
     let response = response.trim();
@@ -80,7 +205,9 @@ pub async fn emit_signal(signal_name: String, payload: Option<String>, ttl: Opti
     }
 }
 
-pub async fn listen_signals(pattern: String, exec_cmd: Option<String>) -> Result<()> {
+pub async fn listen_signals(pattern: String, exec_cmd: Option<String>, token: Option<String>) -> Result<()> {
+    let auth_token = token.or_else(load_token).ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
     println!("Listening for pattern: {}", pattern);
     if let Some(cmd) = &exec_cmd {
         println!("Will execute: {}", cmd);
@@ -88,12 +215,11 @@ pub async fn listen_signals(pattern: String, exec_cmd: Option<String>) -> Result
     
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     
-    let message = format!("LISTEN|{}\n", pattern);
+    let message = format!("LISTEN|{}|{}\n", auth_token, pattern);
     stream.write_all(message.as_bytes()).await?;
     stream.flush().await?;
     
-    let (reader, _writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let mut reader = BufReader::new(&mut stream);
     
     let mut line = String::new();
     loop {
@@ -165,19 +291,20 @@ async fn execute_command(cmd: &str, signal: &Signal) -> Result<()> {
     Ok(())
 }
 
-pub async fn show_history(pattern: String, limit: usize) -> Result<()> {
+pub async fn show_history(pattern: String, limit: usize, token: Option<String>) -> Result<()> {
+    let auth_token = token.or_else(load_token).ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
     println!("Connecting to daemon...");
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     println!("Connected to daemon");
     
-    let message = format!("HISTORY|{}|{}\n", pattern, limit);
+    let message = format!("HISTORY|{}|{}|{}\n", auth_token, pattern, limit);
     println!("Sending: {}", message.trim());
     
     stream.write_all(message.as_bytes()).await?;
     stream.flush().await?;
     
-    let (reader, _) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let mut reader = BufReader::new(&mut stream);
     let mut response = String::new();
     
     println!("Waiting for response...");
@@ -228,14 +355,16 @@ pub async fn show_history(pattern: String, limit: usize) -> Result<()> {
     Ok(())
 }
 
-pub async fn set_rate_limit(pattern: String, max_signals: u32, per_seconds: u64) -> Result<()> {
+pub async fn set_rate_limit(pattern: String, max_signals: u32, per_seconds: u64, token: Option<String>) -> Result<()> {
+    let auth_token = token.or_else(load_token).ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     
-    let command = format!("RATE_LIMIT|{}|{}|{}\n", pattern, max_signals, per_seconds);
+    let command = format!("RATE_LIMIT|{}|{}|{}|{}\n", auth_token, pattern, max_signals, per_seconds);
     stream.write_all(command.as_bytes()).await?;
     stream.flush().await?;
-    
-    let mut reader = BufReader::new(stream);
+
+    let mut reader = BufReader::new(&mut stream);
     let mut response = String::new();
     reader.read_line(&mut response).await?;
     
@@ -243,16 +372,16 @@ pub async fn set_rate_limit(pattern: String, max_signals: u32, per_seconds: u64)
     Ok(())
 }
 
-pub async fn show_rate_limits() -> Result<()> {
+pub async fn show_rate_limits(token: Option<String>) -> Result<()> {
+    let auth_token = token.or_else(load_token).ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
     let mut stream = UnixStream::connect(SOCKET_PATH).await?;
     
-    stream.write_all(b"SHOW_RATE_LIMITS\n").await?;
+    let command = format!("SHOW_RATE_LIMITS|{}\n", auth_token);
+    stream.write_all(command.as_bytes()).await?;
     stream.flush().await?;
     
-    let _ = stream.shutdown().await;
-    
-    let (reader, _) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let mut reader = BufReader::new(&mut stream);
     let mut response = String::new();
     
     loop {

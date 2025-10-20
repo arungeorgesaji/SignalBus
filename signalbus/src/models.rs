@@ -1,5 +1,30 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashSet;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuthToken {
+    pub token: String,
+    pub user_id: String,
+    pub permissions: HashSet<Permission>,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Permission {
+    Read,      
+    Write,       
+    History,   
+    RateLimit, 
+    Admin,     
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuthRequest {
+    pub token: String,
+    pub required_permission: Option<Permission>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Signal {
